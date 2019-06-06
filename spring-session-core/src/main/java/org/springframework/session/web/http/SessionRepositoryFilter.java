@@ -34,10 +34,10 @@ import javax.servlet.http.HttpSession;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
+import org.springframework.context.i18n.LocaleContextHolder;
 import org.springframework.core.annotation.Order;
 import org.springframework.session.Session;
 import org.springframework.session.SessionRepository;
-import org.springframework.web.context.request.RequestAttributes;
 import org.springframework.web.context.request.RequestContextHolder;
 import org.springframework.web.context.request.ServletRequestAttributes;
 
@@ -111,6 +111,8 @@ public class SessionRepositoryFilter<S extends Session> extends OncePerRequestFi
 
 	private HttpSessionIdResolver httpSessionIdResolver = new CookieHttpSessionIdResolver();
 
+	private boolean threadContextInheritable = false;
+
 	/**
 	 * Creates a new instance.
 	 *
@@ -137,6 +139,22 @@ public class SessionRepositoryFilter<S extends Session> extends OncePerRequestFi
 		this.httpSessionIdResolver = httpSessionIdResolver;
 	}
 
+	/**
+	 * Set whether to expose the LocaleContext and RequestAttributes as inheritable
+	 * for child threads (using an {@link java.lang.InheritableThreadLocal}).
+	 * <p>Default is "false", to avoid side effects on spawned background threads.
+	 * Switch this to "true" to enable inheritance for custom child threads which
+	 * are spawned during request processing and only used for this request
+	 * (that is, ending after their initial task, without reuse of the thread).
+	 * <p><b>WARNING:</b> Do not use inheritance for child threads if you are
+	 * accessing a thread pool which is configured to potentially add new threads
+	 * on demand (e.g. a JDK {@link java.util.concurrent.ThreadPoolExecutor}),
+	 * since this will expose the inherited context to such a pooled thread.
+	 */
+	public void setThreadContextInheritable(boolean threadContextInheritable) {
+		this.threadContextInheritable = threadContextInheritable;
+	}
+
 	@Override
 	protected void doFilterInternal(HttpServletRequest request,
 			HttpServletResponse response, FilterChain filterChain)
@@ -147,16 +165,34 @@ public class SessionRepositoryFilter<S extends Session> extends OncePerRequestFi
 				request, response);
 		SessionRepositoryResponseWrapper wrappedResponse = new SessionRepositoryResponseWrapper(
 				wrappedRequest, response);
-		RequestAttributes wrappedAttributes = new ServletRequestAttributes(
+		ServletRequestAttributes wrappedAttributes = new ServletRequestAttributes(
 				wrappedRequest, wrappedResponse);
-		RequestContextHolder.setRequestAttributes(wrappedAttributes);
+		initContextHolders(wrappedRequest, wrappedAttributes);
 
 		try {
 			filterChain.doFilter(wrappedRequest, wrappedResponse);
 		}
 		finally {
 			wrappedRequest.commitSession();
+			resetContextHolders();
+			if (SESSION_LOGGER.isTraceEnabled()) {
+				SESSION_LOGGER.trace("Cleared thread-bound request context: " + request);
+			}
+			wrappedAttributes.requestCompleted();
 		}
+	}
+
+	private void initContextHolders(HttpServletRequest request, ServletRequestAttributes requestAttributes) {
+		LocaleContextHolder.setLocale(request.getLocale(), this.threadContextInheritable);
+		RequestContextHolder.setRequestAttributes(requestAttributes, this.threadContextInheritable);
+		if (SESSION_LOGGER.isTraceEnabled()) {
+			SESSION_LOGGER.trace("Bound request context to thread: " + request);
+		}
+	}
+
+	private void resetContextHolders() {
+		LocaleContextHolder.resetLocaleContext();
+		RequestContextHolder.resetRequestAttributes();
 	}
 
 	/**
